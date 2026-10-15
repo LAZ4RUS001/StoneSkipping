@@ -1,0 +1,1845 @@
+--[[
+    ========================================================================
+    Street Hub - [+1 Stone Skipping]
+    Crafted for Kovak
+    Game: +1 Stone Skipping (Meow Labs)
+    Supported: PC, Delta Mobile, Fluxus, Hydrogen, Codex, Arceus X, Solara
+    UI Framework: Fluent UI (Dawid)
+    ========================================================================
+--]]
+
+-- Clean previous Fluent GUI instances & mobile buttons across ALL containers (CoreGui, gethui, PlayerGui)
+pcall(function()
+    local containers = {}
+    pcall(function() table.insert(containers, game:GetService("CoreGui")) end)
+    pcall(function() if gethui then table.insert(containers, gethui()) end end)
+    pcall(function() table.insert(containers, game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")) end)
+
+    for _, container in ipairs(containers) do
+        if container then
+            for _, g in ipairs(container:GetChildren()) do
+                if g:IsA("ScreenGui") then
+                    if g.Name == "StreetHubStoneSkipping" or g.Name == "StreetHubMobileToggle" or g.Name == "KovakStoneSkippingHub" or g.Name == "KovakHubMobileToggle" then
+                        g:Destroy()
+                    elseif g.Name == "ScreenGui" then
+                        local isHub = false
+                        for _, desc in ipairs(g:GetDescendants()) do
+                            if desc:IsA("TextLabel") and (string.find(desc.Text, "Street Hub") or string.find(desc.Text, "Stone Skipping Hub") or string.find(desc.Text, "Special for Kovak")) then
+                                isHub = true
+                                break
+                            end
+                        end
+                        if isHub then
+                            g:Destroy()
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- Clean any leftover DepthOfField / blur effects created by Fluent Acrylic
+pcall(function()
+    local lighting = game:GetService("Lighting")
+    for _, child in ipairs(lighting:GetChildren()) do
+        if child:IsA("DepthOfFieldEffect") then
+            child:Destroy()
+        end
+    end
+end)
+
+-- Clean previous session threads to prevent competing loops
+if _G.StoneSkippingSession then
+    pcall(function()
+        _G.StoneSkippingSession.Running = false
+    end)
+    task.wait(0.1)
+end
+local Session = { Running = true }
+_G.StoneSkippingSession = Session
+
+-- Safe Services
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local HttpService = game:GetService("HttpService")
+local VirtualUser = game:GetService("VirtualUser")
+local VirtualInputManager
+pcall(function()
+    VirtualInputManager = game:GetService("VirtualInputManager")
+end)
+
+local LocalPlayer = Players.LocalPlayer
+local SkippingNetwork = ReplicatedStorage:WaitForChild("SkippingNetwork", 15)
+local Request = SkippingNetwork and SkippingNetwork:WaitForChild("Request", 15)
+local Event = SkippingNetwork and SkippingNetwork:WaitForChild("Event", 15)
+
+-- Load UI Libraries
+local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
+local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
+local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+
+-- =========================================================================
+-- SILENT BULLETPROOF ANTI-AFK ENGINE (Universal across all executors)
+-- =========================================================================
+do
+    -- 1. Disable Roblox CoreScript 20-minute idle disconnect connections safely
+    pcall(function()
+        if getconnections then
+            for _, conn in ipairs(getconnections(LocalPlayer.Idled)) do
+                pcall(function()
+                    if disableconnection then
+                        disableconnection(conn)
+                    elseif conn.Disable then
+                        conn:Disable()
+                    elseif conn.Disconnect then
+                        conn:Disconnect()
+                    elseif conn.Enabled ~= nil then
+                        conn.Enabled = false
+                    end
+                end)
+            end
+        end
+    end)
+
+    -- 2. Fallback hook on Idled event
+    pcall(function()
+        LocalPlayer.Idled:Connect(function()
+            pcall(function()
+                if VirtualUser then
+                    VirtualUser:CaptureController()
+                    VirtualUser:ClickButton2(Vector2.new(0, 0))
+                end
+            end)
+        end)
+    end)
+
+    -- 3. Proactive heartbeat input pulse every 60 seconds (Keeps session alive without rejoin)
+    task.spawn(function()
+        while Session.Running do
+            task.wait(60)
+            pcall(function()
+                if VirtualInputManager and VirtualInputManager.SendMouseMoveEvent then
+                    local cam = workspace.CurrentCamera
+                    local vpSize = cam and cam.ViewportSize or Vector2.new(800, 600)
+                    VirtualInputManager:SendMouseMoveEvent(vpSize.X / 2 + 1, vpSize.Y / 2 + 1, game)
+                    task.wait(0.02)
+                    VirtualInputManager:SendMouseMoveEvent(vpSize.X / 2, vpSize.Y / 2, game)
+                elseif VirtualUser then
+                    VirtualUser:CaptureController()
+                    VirtualUser:ClickButton2(Vector2.new(0, 0))
+                end
+            end)
+        end
+    end)
+end
+
+-- =========================================================================
+-- GLOBAL AUTOMATION STATE
+-- =========================================================================
+local State = {
+    -- Auto Farm
+    AutoPractice = false,
+    PracticeZone = "Auto",
+    AutoThrow = false,
+    ThrowDelay = 1.0,
+    PlayCutscene = true,
+    AutoRebirth = false,
+
+    -- Eggs & Pets
+    AutoHatch = false,
+    SelectedEgg = "Common",
+    HatchCount = 1,
+    HatchDelay = 0.8,
+    AutoTeleportToEgg = false,
+    AutoEquipBest = true,
+    AutoClaimPetIndex = false,
+
+    -- Rewards
+    AutoClaimGifts = false,
+    AutoClaimDaily = false,
+    AutoClaimOffline = false,
+    AutoClaimFree = false,
+
+    -- Player Modification
+    SpeedHack = false,
+    WalkSpeedValue = 32,
+    JumpHack = false,
+    JumpPowerValue = 80,
+
+    -- Runtime ID Counters
+    ThrowRequestId = 0,
+    HatchRequestId = 0,
+}
+
+-- Hook to protect automated throws from being canceled by local game client (Level 7+ executors)
+pcall(function()
+    if hookmetamethod then
+        local oldNamecall
+        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+            local method = getnamecallmethod()
+            local args = {...}
+            if method == "FireServer" and args[1] == "CancelThrow" and State.AutoThrow then
+                return nil
+            end
+            return oldNamecall(self, ...)
+        end)
+    end
+end)
+
+-- Safe GUI Parent Resolver (Solara / Delta / Codex / PC)
+local function GetSafeGuiParent()
+    local ok, res = pcall(function()
+        if gethui then
+            return gethui()
+        end
+        return game:GetService("CoreGui")
+    end)
+    if ok and res then return res end
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+-- Safe Teleport Helper
+local function SafeTeleport(pos)
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if root and pos then
+        root.CFrame = CFrame.new(pos + Vector3.new(0, 1.5, 0))
+    end
+end
+
+-- =========================================================================
+-- DYNAMIC MULTI-WORLD RESOLVER (Supports World 1 through World 6 & Custom)
+-- =========================================================================
+local WorldResolver = {}
+
+function WorldResolver.GetCurrentWorld()
+    local attr = LocalPlayer:GetAttribute("SkippingWorld")
+    if attr and attr ~= "" then
+        return attr
+    end
+    local worlds = workspace:FindFirstChild("SkippingWorlds")
+    if worlds and #worlds:GetChildren() > 0 then
+        return worlds:GetChildren()[1].Name
+    end
+    return "World1"
+end
+
+function WorldResolver.GetWorldObject()
+    local worldName = WorldResolver.GetCurrentWorld()
+    local worlds = workspace:FindFirstChild("SkippingWorlds")
+    if worlds then
+        return worlds:FindFirstChild(worldName) or worlds:GetChildren()[1]
+    end
+    return nil
+end
+
+function WorldResolver.GetLaunchZonePosition()
+    local worldObj = WorldResolver.GetWorldObject()
+    if worldObj then
+        local launch = worldObj:FindFirstChild("LaunchZone")
+        if launch then
+            if launch:IsA("BasePart") then
+                return launch.Position + Vector3.new(0, 1.5, 0)
+            else
+                return launch:GetPivot().Position + Vector3.new(0, 1.5, 0)
+            end
+        end
+    end
+    -- Fallback by world name
+    local wName = WorldResolver.GetCurrentWorld()
+    if wName == "World2" then
+        return Vector3.new(12000, 4.5, -8)
+    end
+    return Vector3.new(0, 4.5, -7.6)
+end
+
+function WorldResolver.GetTrainingZones()
+    local worldObj = WorldResolver.GetWorldObject()
+    local zones = {}
+    if worldObj then
+        local tZones = worldObj:FindFirstChild("TrainingZones")
+        if tZones then
+            for _, z in ipairs(tZones:GetChildren()) do
+                local pad = z:FindFirstChild("Pad") or z:FindFirstChild("Zone") or z:FindFirstChildWhichIsA("BasePart")
+                local pos = pad and pad.Position or (z:IsA("Model") and z:GetPivot().Position)
+                local req = 0
+                local mult = "1x"
+                local isRobux = false
+
+                for _, desc in ipairs(z:GetDescendants()) do
+                    if desc:IsA("TextLabel") then
+                        local t = desc.Text
+                        local r = t:match("^(%d+)$")
+                        if r then req = tonumber(r) end
+                        local m = t:match("(%d+x)%s*SKILL")
+                        if m then mult = m end
+                        if string.find(t, "ALL WORLDS") then
+                            isRobux = true
+                        end
+                    end
+                end
+
+                if pos then
+                    zones[z.Name] = {
+                        Name = z.Name,
+                        Position = pos,
+                        RebirthReq = req,
+                        Multiplier = mult,
+                        IsRobux = isRobux
+                    }
+                end
+            end
+        end
+    end
+    return zones
+end
+
+function WorldResolver.GetBestRebirthZone()
+    local rebirths = 0
+    pcall(function()
+        rebirths = LocalPlayer.leaderstats and tonumber(LocalPlayer.leaderstats.Rebirths.Value) or 0
+    end)
+
+    local zones = WorldResolver.GetTrainingZones()
+    local bestZone = nil
+    local maxReq = -1
+
+    for _, z in pairs(zones) do
+        if not z.IsRobux and rebirths >= z.RebirthReq and z.RebirthReq > maxReq then
+            maxReq = z.RebirthReq
+            bestZone = z
+        end
+    end
+
+    if bestZone then
+        return bestZone.Position, bestZone
+    end
+
+    -- Fallback by world
+    local wName = WorldResolver.GetCurrentWorld()
+    if wName == "World2" then
+        return Vector3.new(11963.46, 5.5, -26.1), nil
+    end
+    return Vector3.new(-36.54, 5.5, -25.7), nil
+end
+
+function WorldResolver.GetEggStandPosition(eggName)
+    local worldObj = WorldResolver.GetWorldObject()
+    if worldObj then
+        local eggShop = worldObj:FindFirstChild("EggShop")
+        local displays = eggShop and eggShop:FindFirstChild("Displays")
+        local eggModel = displays and displays:FindFirstChild(eggName)
+        if eggModel then
+            local pos = eggModel:GetPivot().Position
+            return pos + Vector3.new(0, 1.2, 3.2)
+        end
+        if eggShop then
+            return eggShop:GetPivot().Position + Vector3.new(0, 1.5, 0)
+        end
+    end
+
+    -- Static Fallbacks
+    local Fallbacks = {
+        Common = Vector3.new(-15, 5.5, -96.6),
+        Uncommon = Vector3.new(-11, 5.5, -104.6),
+        Rare = Vector3.new(11, 5.5, -104.6),
+        Special = Vector3.new(14.7, 5.5, -96.5),
+        Epic = Vector3.new(11985, 5.5, -97),
+        PirateSpecial = Vector3.new(12014.7, 5.5, -96.9),
+        Legendary = Vector3.new(11989, 5.5, -105),
+        Mythical = Vector3.new(12011, 5.5, -105),
+        HackedAdmin = Vector3.new(13.4, 5.5, -21.8)
+    }
+    local fb = Fallbacks[eggName]
+    if fb then
+        return fb + Vector3.new(0, 1.2, 3.2)
+    end
+    return Vector3.new(0, 5.5, -100.0)
+end
+
+-- Universal Rebirth Readiness Checker (Multiple redundant detectors across PC & Mobile)
+local function CanPlayerRebirth()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local hud = pg and pg:FindFirstChild("SkippingHUD")
+    if not hud then return false end
+
+    -- 1. Inspect SideMenu Rebirth button progress (shows "100%" or "MAX" or "REBIRTH")
+    local ok1, can1 = pcall(function()
+        local left = hud:FindFirstChild("HUD") and hud.HUD:FindFirstChild("Left")
+        local rebirthBtn = left and left:FindFirstChild("SideMenu") and left.SideMenu:FindFirstChild("RebirthSlot") and left.SideMenu.RebirthSlot:FindFirstChild("Rebirth")
+        local prog = rebirthBtn and rebirthBtn:FindFirstChild("Progress")
+        if prog and (prog.Text == "100%" or string.find(prog.Text, "100") or string.find(prog.Text:lower(), "max") or string.find(prog.Text:lower(), "ready")) then
+            return true
+        end
+        return false
+    end)
+    if ok1 and can1 then return true end
+
+    -- 2. Inspect Bottom HUD RebirthMessage
+    local ok2, can2 = pcall(function()
+        local bottom = hud:FindFirstChild("HUD") and hud.HUD:FindFirstChild("Bottom")
+        local rebMsg = bottom and bottom:FindFirstChild("RebirthMessage", true)
+        if rebMsg and rebMsg.Visible and rebMsg.Text ~= "" and string.find(rebMsg.Text:lower(), "rebirth") then
+            return true
+        end
+        return false
+    end)
+    if ok2 and can2 then return true end
+
+    -- 3. Inspect RebirthOverlay Requirement if opened
+    local ok3, can3 = pcall(function()
+        local overlay = hud:FindFirstChild("RebirthOverlay", true)
+        local reqLabel = overlay and overlay:FindFirstChild("Requirement", true)
+        if reqLabel and reqLabel.Text ~= "" then
+            local cur, req = reqLabel.Text:match("Level%s*(%d+)%s*/%s*Level%s*(%d+)")
+            if cur and req then
+                return tonumber(cur) >= tonumber(req)
+            end
+        end
+        return false
+    end)
+    if ok3 and can3 then return true end
+
+    return false
+end
+
+-- Universal Pet Index Automation Helper (Reveals pending pets & claims tier rewards)
+local function ProcessPetIndex()
+    local didAction = false
+    pcall(function()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        local hud = pg and pg:FindFirstChild("SkippingHUD")
+        local indexPage = hud and hud:FindFirstChild("IndexPage", true)
+
+        if indexPage then
+            -- 1. Reveal all pending discovered pets to advance Index XP
+            local claimAll = indexPage:FindFirstChild("ClaimAll")
+            if claimAll and claimAll.Active then
+                didAction = true
+                if firesignal then
+                    firesignal(claimAll.Activated)
+                elseif getconnections then
+                    for _, c in ipairs(getconnections(claimAll.Activated)) do
+                        if c.Fire then c:Fire() elseif c.Function then c.Function() end
+                    end
+                end
+            end
+
+            -- 2. Claim unlocked Index milestone reward
+            local reward = indexPage:FindFirstChild("Reward")
+            local claim = reward and reward:FindFirstChild("Claim")
+            if claim and claim.Active then
+                didAction = true
+                if firesignal then
+                    firesignal(claim.Activated)
+                elseif getconnections then
+                    for _, c in ipairs(getconnections(claim.Activated)) do
+                        if c.Fire then c:Fire() elseif c.Function then c.Function() end
+                    end
+                end
+            end
+        end
+
+        -- 3. Direct network fallback to server
+        if Request then
+            Request:FireServer("ClaimPetIndex", nil)
+        end
+    end)
+    return didAction
+end
+
+-- =========================================================================
+-- FLUENT WINDOW INITIALIZATION
+-- =========================================================================
+local cam = workspace.CurrentCamera
+local vpSize = cam and cam.ViewportSize or Vector2.new(800, 600)
+local winWidth = math.clamp(vpSize.X - 40, 360, 580)
+local winHeight = math.clamp(vpSize.Y - 40, 320, 460)
+
+local Window = Fluent:CreateWindow({
+    Title = "Street Hub",
+    SubTitle = "+1 Stone Skipping",
+    TabWidth = 150,
+    Size = UDim2.fromOffset(winWidth, winHeight),
+    Acrylic = false, -- Disabled to eliminate center-screen rectangular blur artifacts completely
+    Theme = "Dark",
+    MinimizeKey = Enum.KeyCode.RightControl
+})
+
+-- Assign unique identifier to this session's Fluent ScreenGui
+local FluentScreenGui = Window.Root:FindFirstAncestorOfClass("ScreenGui")
+if FluentScreenGui then
+    FluentScreenGui.Name = "StreetHubStoneSkipping"
+    _G.StoneSkippingGui = FluentScreenGui
+end
+
+local Tabs = {
+    Main = Window:AddTab({ Title = "Auto Farm", Icon = "flame" }),
+    Pets = Window:AddTab({ Title = "Eggs & Pets", Icon = "egg" }),
+    Rewards = Window:AddTab({ Title = "Rewards", Icon = "gift" }),
+    Teleports = Window:AddTab({ Title = "Teleports", Icon = "map-pin" }),
+    Player = Window:AddTab({ Title = "Player", Icon = "user" }),
+    Settings = Window:AddTab({ Title = "Settings", Icon = "settings" })
+}
+
+local Options = Fluent.Options
+
+local EggDisplayToId = {
+    ["Common (50 Wins) [W1]"] = "Common",
+    ["Uncommon (500 Wins) [W1]"] = "Uncommon",
+    ["Rare (4,000 Wins) [W1]"] = "Rare",
+    ["Special [W1]"] = "Special",
+    ["Epic (35K Wins) [W2]"] = "Epic",
+    ["Legendary (350K Wins) [W2]"] = "Legendary",
+    ["Mythical (3.5M Wins) [W2]"] = "Mythical",
+    ["PirateSpecial [W2]"] = "PirateSpecial",
+    ["SpaceDivine [W3]"] = "SpaceDivine",
+    ["Ascended [W3]"] = "Ascended",
+    ["Eternal [W3]"] = "Eternal",
+    ["Astronaut [W3]"] = "Astronaut",
+    ["Celestial [W4]"] = "Celestial",
+    ["Transcendent [W4]"] = "Transcendent",
+    ["Empyrean [W4]"] = "Empyrean",
+    ["Chocolatier [W4]"] = "Chocolatier",
+    ["Primordial [W5]"] = "Primordial",
+    ["Titan [W5]"] = "Titan",
+    ["Infinity [W5]"] = "Infinity",
+    ["Dragon [W5]"] = "Dragon",
+    ["Oracle [W6]"] = "Oracle",
+    ["Arcane [W6]"] = "Arcane",
+    ["Eldritch [W6]"] = "Eldritch",
+    ["Witch [W6]"] = "Witch",
+    ["HackedAdmin [Special]"] = "HackedAdmin"
+}
+
+-- =========================================================================
+-- AUTO-SAVE WHITELIST & HELPERS
+-- =========================================================================
+local AutoSavePath = "StreetHub/StoneSkipping_AutoSave.json"
+local isInitializing = true
+local saveQueued = false
+
+local AutoSaveWhitelist = {
+    TogglePractice = true,
+    PracticeZone = true,
+    ToggleThrow = true,
+    ThrowDelay = true,
+    ToggleCutscene = true,
+    ToggleRebirth = true,
+    ToggleHatch = true,
+    ToggleTeleportEgg = true,
+    EggSelect = true,
+    HatchCount = true,
+    HatchQuantity = true,
+    HatchDelaySlider = true,
+    ToggleAutoEquip = true,
+    ToggleGifts = true,
+    ToggleDaily = true,
+    ToggleOffline = true,
+    ToggleFree = true,
+    TogglePetIndex = true,
+    ToggleSpeed = true,
+    WalkSpeedSlider = true,
+    ToggleJump = true,
+    JumpPowerSlider = true
+}
+
+local function SaveSettingsNow()
+    pcall(function()
+        local data = {}
+        for name, opt in pairs(Fluent.Options) do
+            if AutoSaveWhitelist[name] and (opt.Type == "Toggle" or opt.Type == "Slider" or opt.Type == "Dropdown") then
+                data[name] = {
+                    Type = opt.Type,
+                    Value = opt.Value
+                }
+            end
+        end
+        if makefolder and not isfolder("StreetHub") then
+            makefolder("StreetHub")
+        end
+        local encoded = HttpService:JSONEncode(data)
+        if writefile and encoded and #encoded > 5 then
+            writefile(AutoSavePath, encoded)
+        end
+    end)
+end
+
+local function QueueAutoSave()
+    if isInitializing then return end
+    if saveQueued then return end
+    saveQueued = true
+    task.delay(0.5, function()
+        saveQueued = false
+        SaveSettingsNow()
+    end)
+end
+
+local function SyncStateFromOptions()
+    if not Options then return end
+    pcall(function()
+        if Options.TogglePractice then
+            State.AutoPractice = Options.TogglePractice.Value
+        end
+        if Options.PracticeZone then
+            local val = Options.PracticeZone.Value or ""
+            if string.find(val, "EpicCrystal") then State.PracticeZone = "TrainingZone_EpicCrystal"
+            elseif string.find(val, "RareJade") then State.PracticeZone = "TrainingZone_RareJade"
+            elseif string.find(val, "LegendaryCelestial") then State.PracticeZone = "TrainingZone_LegendaryCelestial"
+            elseif string.find(val, "Default") then State.PracticeZone = "TrainingZone"
+            else State.PracticeZone = "Auto" end
+        end
+        if Options.ToggleThrow then
+            State.AutoThrow = Options.ToggleThrow.Value
+        end
+        if Options.ThrowDelay then
+            State.ThrowDelay = tonumber(Options.ThrowDelay.Value) or 1.0
+        end
+        if Options.ToggleCutscene then
+            State.PlayCutscene = Options.ToggleCutscene.Value
+            State.PlayThrowCutscene = Options.ToggleCutscene.Value
+        end
+        if Options.ToggleRebirth then
+            State.AutoRebirth = Options.ToggleRebirth.Value
+        end
+        if Options.ToggleHatch then
+            State.AutoHatch = Options.ToggleHatch.Value
+        end
+        if Options.ToggleTeleportEgg then
+            State.AutoTeleportToEgg = Options.ToggleTeleportEgg.Value
+        end
+        if Options.EggSelect then
+            local disp = Options.EggSelect.Value
+            State.SelectedEgg = EggDisplayToId[disp] or disp or "Common"
+        end
+        local hatchOpt = Options.HatchCount or Options.HatchQuantity
+        if hatchOpt then
+            State.HatchCount = string.find(tostring(hatchOpt.Value or ""), "3") and 3 or 1
+        end
+        if Options.HatchDelaySlider then
+            State.HatchDelay = tonumber(Options.HatchDelaySlider.Value) or 0.8
+            State.HatchSpeed = State.HatchDelay
+        end
+        if Options.ToggleAutoEquip then
+            State.AutoEquipBest = Options.ToggleAutoEquip.Value
+        end
+        if Options.TogglePetIndex then
+            State.AutoClaimPetIndex = Options.TogglePetIndex.Value
+        end
+        if Options.ToggleGifts then
+            State.AutoClaimGifts = Options.ToggleGifts.Value
+        end
+        if Options.ToggleDaily then
+            State.AutoClaimDaily = Options.ToggleDaily.Value
+        end
+        if Options.ToggleOffline then
+            State.AutoClaimOffline = Options.ToggleOffline.Value
+        end
+        if Options.ToggleFree then
+            State.AutoClaimFree = Options.ToggleFree.Value
+        end
+        if Options.ToggleSpeed then
+            State.SpeedHack = Options.ToggleSpeed.Value
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum then
+                hum.WalkSpeed = State.SpeedHack and State.WalkSpeedValue or 16
+            end
+        end
+        if Options.WalkSpeedSlider then
+            State.WalkSpeedValue = tonumber(Options.WalkSpeedSlider.Value) or 32
+        end
+        if Options.ToggleJump then
+            State.JumpHack = Options.ToggleJump.Value
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum then
+                hum.UseJumpPower = true
+                hum.JumpPower = State.JumpHack and State.JumpPowerValue or 50
+            end
+        end
+        if Options.JumpPowerSlider then
+            State.JumpPowerValue = tonumber(Options.JumpPowerSlider.Value) or 80
+        end
+    end)
+end
+
+-- =========================================================================
+-- MOBILE / UNIVERSAL FLOATING DRAGGABLE TOGGLE BUTTON
+-- (Ensures Delta, Fluxus, Hydrogen, Codex, Arceus X & PC can toggle UI)
+-- =========================================================================
+-- Helper to load StreetHub Custom Logo from base64 or cached file
+local function GetStreetHubLogo()
+    local fileName = "streethub_logo.png"
+    local getAsset = getcustomasset or getsynasset
+    if not getAsset then
+        return "rbxassetid://10734975486"
+    end
+    local ok, res = pcall(function()
+        local needWrite = true
+        pcall(function()
+            if isfile and readfile and isfile(fileName) then
+                local existing = readfile(fileName)
+                if existing and #existing == 18939 then
+                    needWrite = false
+                end
+            end
+        end)
+        if needWrite and writefile then
+            local b64Data = "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"
+            local decoded = nil
+            pcall(function()
+                if crypt and crypt.base64decode then
+                    decoded = crypt.base64decode(b64Data)
+                elseif base64_decode then
+                    decoded = base64_decode(b64Data)
+                elseif base64 and base64.decode then
+                    decoded = base64.decode(b64Data)
+                end
+            end)
+            if not decoded then
+                pcall(function()
+                    local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+                    local str = string.gsub(b64Data, '[^'..b..'=]', '')
+                    decoded = (str:gsub('.', function(x)
+                        if (x == '=') then return '' end
+                        local r, f = '', (b:find(x) - 1)
+                        for i = 6, 1, -1 do r = r .. (f % 2^i - f % 2^(i-1) > 0 and '1' or '0') end
+                        return r
+                    end):gsub('%d%d%d?%d?%d?%d?%d?%d?', function(x)
+                        if (#x ~= 8) then return '' end
+                        local c = 0
+                        for i = 1, 8 do c = c + (x:sub(i,i) == '1' and 2^(8-i) or 0) end
+                        return string.char(c)
+                    end))
+                end)
+            end
+            if decoded and #decoded > 100 then
+                writefile(fileName, decoded)
+            end
+        end
+        return getAsset(fileName)
+    end)
+    if ok and res then
+        return res
+    end
+    return "rbxassetid://10734975486"
+end
+
+local function GetSafeGuiParent()
+    if FluentScreenGui and FluentScreenGui.Parent then
+        return FluentScreenGui.Parent
+    end
+    local ok, res = pcall(function() return gethui and gethui() end)
+    if ok and res then return res end
+    local ok2, res2 = pcall(function() return game:GetService("CoreGui") end)
+    if ok2 and res2 then return res2 end
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local function CreateMobileToggleButton(win)
+    local targetGui = FluentScreenGui or win.Root:FindFirstAncestorOfClass("ScreenGui")
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "StreetHubMobileToggle"
+    screenGui.ResetOnSpawn = false
+    screenGui.DisplayOrder = 999999
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    screenGui.Parent = GetSafeGuiParent()
+
+    local btn = Instance.new("TextButton")
+    btn.Name = "ToggleIcon"
+    btn.Size = UDim2.fromOffset(50, 50)
+    btn.Position = UDim2.new(0, 43, 0.45, 0)
+    btn.AnchorPoint = Vector2.new(0.5, 0.5)
+    btn.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
+    btn.Text = ""
+    btn.AutoButtonColor = false
+    btn.Active = true
+    btn.Parent = screenGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(1, 0)
+    corner.Parent = btn
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(255, 60, 60)
+    stroke.Thickness = 2
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    stroke.Parent = btn
+
+    local icon = Instance.new("ImageLabel")
+    icon.Name = "Icon"
+    icon.Size = UDim2.fromScale(0.88, 0.88)
+    icon.Position = UDim2.fromScale(0.5, 0.5)
+    icon.AnchorPoint = Vector2.new(0.5, 0.5)
+    icon.BackgroundTransparency = 1
+    icon.Image = GetStreetHubLogo()
+    icon.ImageColor3 = Color3.fromRGB(255, 255, 255)
+    icon.ScaleType = Enum.ScaleType.Fit
+    icon.Parent = btn
+
+    local iconCorner = Instance.new("UICorner")
+    iconCorner.CornerRadius = UDim.new(1, 0)
+    iconCorner.Parent = icon
+
+    local lastToggle = 0
+    local isHubOpen = true
+
+    local function ToggleHub()
+        if os.clock() - lastToggle < 0.25 then return end
+        lastToggle = os.clock()
+
+        isHubOpen = not isHubOpen
+
+        local currentGui = FluentScreenGui or (win.Root and win.Root:FindFirstAncestorOfClass("ScreenGui"))
+        if currentGui then
+            currentGui.Enabled = isHubOpen
+        end
+        if win.Root then
+            win.Root.Visible = isHubOpen
+        end
+
+        -- Ensure background blur / DepthOfField never stays on screen
+        pcall(function()
+            if Fluent and Fluent.ToggleAcrylic then
+                Fluent:ToggleAcrylic(false)
+            end
+            local dof = game:GetService("Lighting"):FindFirstChildOfClass("DepthOfFieldEffect")
+            if dof then
+                dof.Enabled = false
+            end
+        end)
+
+        -- Smooth status transition
+        TweenService:Create(stroke, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Color = isHubOpen and Color3.fromRGB(255, 60, 60) or Color3.fromRGB(75, 75, 85)
+        }):Play()
+
+        TweenService:Create(icon, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            ImageTransparency = isHubOpen and 0 or 0.45
+        }):Play()
+
+        -- Punchy spring bounce feedback
+        TweenService:Create(btn, TweenInfo.new(0.12, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Size = UDim2.fromOffset(53, 53)
+        }):Play()
+        task.delay(0.12, function()
+            TweenService:Create(btn, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                Size = UDim2.fromOffset(50, 50)
+            }):Play()
+        end)
+    end
+
+    -- Ultra-responsive Drag & Tap Engine for Mobile & PC
+    local isDragging = false
+    local dragStartPos = nil
+    local startButtonPos = nil
+    local movedFar = false
+    local pressStartTime = 0
+
+    btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            isDragging = true
+            movedFar = false
+            dragStartPos = input.Position
+            startButtonPos = btn.Position
+            pressStartTime = os.clock()
+
+            -- Smooth press down effect
+            TweenService:Create(btn, TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                Size = UDim2.fromOffset(45, 45)
+            }):Play()
+        end
+    end)
+
+    btn.MouseEnter:Connect(function()
+        if not isDragging then
+            TweenService:Create(btn, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                Size = UDim2.fromOffset(52, 52)
+            }):Play()
+        end
+    end)
+
+    btn.MouseLeave:Connect(function()
+        if not isDragging then
+            TweenService:Create(btn, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                Size = UDim2.fromOffset(50, 50)
+            }):Play()
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if isDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            if dragStartPos and startButtonPos then
+                local delta = input.Position - dragStartPos
+                if delta.Magnitude > 8 then
+                    movedFar = true
+                end
+                if movedFar then
+                    local targetPos = UDim2.new(
+                        startButtonPos.X.Scale,
+                        startButtonPos.X.Offset + delta.X,
+                        startButtonPos.Y.Scale,
+                        startButtonPos.Y.Offset + delta.Y
+                    )
+                    btn.Position = targetPos
+                end
+            end
+        end
+    end)
+
+    btn.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            if isDragging then
+                isDragging = false
+
+                TweenService:Create(btn, TweenInfo.new(0.15, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+                    Size = UDim2.fromOffset(50, 50)
+                }):Play()
+
+                local dragDistance = dragStartPos and (input.Position - dragStartPos).Magnitude or 0
+                local elapsed = os.clock() - pressStartTime
+
+                -- Trigger toggle on tap/click (not dragging)
+                if not movedFar or dragDistance < 10 or elapsed < 0.25 then
+                    ToggleHub()
+                end
+
+                dragStartPos = nil
+                startButtonPos = nil
+            end
+        end
+    end)
+
+    -- Bulletproof native activation fallback
+    btn.Activated:Connect(function()
+        if not movedFar then
+            ToggleHub()
+        end
+    end)
+
+    return screenGui
+end
+CreateMobileToggleButton(Window)
+
+-- =========================================================================
+-- =========================================================================
+-- TAB: AUTO FARM
+-- =========================================================================
+do
+    Tabs.Main:AddSection("Skill Training (ฟาร์มสกิล)")
+
+    local TogglePractice = Tabs.Main:AddToggle("TogglePractice", {
+        Title = "Auto Practice",
+        Description = "วาปเข้าแท่นฝึกที่ดีที่สุด และย้ายแท่นให้อัตโนมัติ",
+        Default = false
+    })
+    TogglePractice:OnChanged(function(val)
+        State.AutoPractice = (val ~= nil) and val or Options.TogglePractice.Value
+        if SyncStateFromOptions then SyncStateFromOptions() end
+        if QueueAutoSave then QueueAutoSave() end
+    end)
+
+    local DropdownZone = Tabs.Main:AddDropdown("PracticeZone", {
+        Title = "Select Training Zone",
+        Description = "เลือกแท่นฝึก (Auto = แท่นสูงสุดตาม Rebirth ปัจจุบัน)",
+        Values = {
+            "Auto: Best Rebirth Zone (แนะนำ)",
+            "TrainingZone (Default)",
+            "TrainingZone_RareJade (Rebirth 1)",
+            "TrainingZone_EpicCrystal (Rebirth 2)",
+            "TrainingZone_LegendaryCelestial (Rebirth 3)"
+        },
+        Multi = false,
+        Default = 1
+    })
+    DropdownZone:OnChanged(function(val)
+        if SyncStateFromOptions then SyncStateFromOptions() end
+        if QueueAutoSave then QueueAutoSave() end
+    end)
+
+    Tabs.Main:AddSection("Wins Farming (ขว้างหิน)")
+
+    local ToggleThrow = Tabs.Main:AddToggle("ToggleThrow", {
+        Title = "Auto Throw Stone",
+        Description = "วาปเข้า LaunchZone และขว้างหินเพื่อฟาร์ม Wins",
+        Default = false
+    })
+    ToggleThrow:OnChanged(function(val)
+        State.AutoThrow = (val ~= nil) and val or Options.ToggleThrow.Value
+        if SyncStateFromOptions then SyncStateFromOptions() end
+        if QueueAutoSave then QueueAutoSave() end
+    end)
+
+    Tabs.Main:AddSlider("ThrowDelay", {
+        Title = "Throw Delay (Seconds)",
+        Description = "หน่วงเวลาการขว้างหินแต่ละรอบ",
+        Default = 1.0,
+        Min = 0.4,
+        Max = 3.0,
+        Rounding = 1,
+        Callback = function(val)
+            State.ThrowDelay = val
+            if QueueAutoSave then QueueAutoSave() end
+        end
+    })
+
+    local ToggleCutscene = Tabs.Main:AddToggle("ToggleCutscene", {
+        Title = "Play Throw Cutscene",
+        Description = "เปิดมุมกล้อง Cutscene ติดตามหิน",
+        Default = true
+    })
+    ToggleCutscene:OnChanged(function(val)
+        local cVal = (val ~= nil) and val or Options.ToggleCutscene.Value
+        State.PlayCutscene = cVal
+        State.PlayThrowCutscene = cVal
+        if SyncStateFromOptions then SyncStateFromOptions() end
+        if QueueAutoSave then QueueAutoSave() end
+    end)
+
+    Tabs.Main:AddSection("Progression (เกิดใหม่)")
+
+    local ToggleRebirth = Tabs.Main:AddToggle("ToggleRebirth", {
+        Title = "Auto Rebirth",
+        Description = "เกิดใหม่อัตโนมัติทันทีที่เลเวลถึงเกณฑ์",
+        Default = false
+    })
+    ToggleRebirth:OnChanged(function(val)
+        State.AutoRebirth = (val ~= nil) and val or Options.ToggleRebirth.Value
+        if SyncStateFromOptions then SyncStateFromOptions() end
+        if QueueAutoSave then QueueAutoSave() end
+    end)
+end
+
+-- =========================================================================
+-- TAB: EGGS & PETS
+-- =========================================================================
+do
+    Tabs.Pets:AddSection("Egg Hatching (สุ่มไข่)")
+
+    local ToggleHatch = Tabs.Pets:AddToggle("ToggleHatch", {
+        Title = "Auto Hatch",
+        Description = "เปิด/ปิด ระบบสุ่มไข่อัตโนมัติ",
+        Default = false
+    })
+    ToggleHatch:OnChanged(function(val)
+        State.AutoHatch = (val ~= nil) and val or Options.ToggleHatch.Value
+        if State.AutoHatch and Request and State.AutoTeleportToEgg then
+            Request:FireServer("StopPractice", nil)
+        end
+        if SyncStateFromOptions then SyncStateFromOptions() end
+        if QueueAutoSave then QueueAutoSave() end
+    end)
+
+    local ToggleTeleport = Tabs.Pets:AddToggle("ToggleTeleportEgg", {
+        Title = "Teleport to Egg Stand",
+        Description = "วาปตัวละครไปยืนหน้าตู้ไข่ที่เลือก",
+        Default = false
+    })
+    ToggleTeleport:OnChanged(function(val)
+        State.AutoTeleportToEgg = (val ~= nil) and val or Options.ToggleTeleportEgg.Value
+        if SyncStateFromOptions then SyncStateFromOptions() end
+        if QueueAutoSave then QueueAutoSave() end
+    end)
+
+    local DropdownEgg = Tabs.Pets:AddDropdown("EggSelect", {
+        Title = "Select Egg",
+        Description = "เลือกรุ่นไข่ที่ต้องการฟาร์ม",
+        Values = {
+            "Common (50 Wins) [W1]",
+            "Uncommon (500 Wins) [W1]",
+            "Rare (4,000 Wins) [W1]",
+            "Special [W1]",
+            "Epic (35K Wins) [W2]",
+            "Legendary (350K Wins) [W2]",
+            "Mythical (3.5M Wins) [W2]",
+            "PirateSpecial [W2]",
+            "SpaceDivine [W3]",
+            "Ascended [W3]",
+            "Eternal [W3]",
+            "Astronaut [W3]",
+            "Celestial [W4]",
+            "Transcendent [W4]",
+            "Empyrean [W4]",
+            "Chocolatier [W4]",
+            "Primordial [W5]",
+            "Titan [W5]",
+            "Infinity [W5]",
+            "Dragon [W5]",
+            "Oracle [W6]",
+            "Arcane [W6]",
+            "Eldritch [W6]",
+            "Witch [W6]",
+            "HackedAdmin [Special]"
+        },
+        Multi = false,
+        Default = 1
+    })
+    DropdownEgg:OnChanged(function(val)
+        State.SelectedEgg = EggDisplayToId[val] or val or "Common"
+        if SyncStateFromOptions then SyncStateFromOptions() end
+        if QueueAutoSave then QueueAutoSave() end
+    end)
+
+    local DropdownHatchCount = Tabs.Pets:AddDropdown("HatchCount", {
+        Title = "Hatch Quantity",
+        Values = {"1x (Free)", "3x (GamePass)"},
+        Multi = false,
+        Default = 1
+    })
+    DropdownHatchCount:OnChanged(function(val)
+        State.HatchCount = string.find(val or "", "3") and 3 or 1
+        if SyncStateFromOptions then SyncStateFromOptions() end
+        if QueueAutoSave then QueueAutoSave() end
+    end)
+
+    Tabs.Pets:AddSlider("HatchDelaySlider", {
+        Title = "Hatch Speed (Seconds)",
+        Description = "ความเร็วการส่งสุ่มไข่ (แนะนำ 0.8s)",
+        Default = 0.8,
+        Min = 0.5,
+        Max = 2.5,
+        Rounding = 1,
+        Callback = function(val)
+            State.HatchDelay = val
+            State.HatchSpeed = val
+            if QueueAutoSave then QueueAutoSave() end
+        end
+    })
+
+    Tabs.Pets:AddSection("Pet Management (จัดการสัตว์เลี้ยง)")
+
+    local ToggleAutoEquip = Tabs.Pets:AddToggle("ToggleAutoEquip", {
+        Title = "Auto Equip Best",
+        Description = "สวมใส่สัตว์เลี้ยงตัวที่ดีที่สุดอัตโนมัติ",
+        Default = true
+    })
+    ToggleAutoEquip:OnChanged(function(val)
+        State.AutoEquipBest = (val ~= nil) and val or Options.ToggleAutoEquip.Value
+        if SyncStateFromOptions then SyncStateFromOptions() end
+        if QueueAutoSave then QueueAutoSave() end
+    end)
+
+    Tabs.Pets:AddButton({
+        Title = "Equip Best Now",
+        Description = "กดสวมใส่สัตว์เลี้ยงที่ดีที่สุดทันที",
+        Callback = function()
+            if Request then
+                Request:FireServer("PetEquipment", { Action = "EquipBest" })
+                Fluent:Notify({
+                    Title = "Pets",
+                    Content = "สวมใส่สัตว์เลี้ยงที่ดีที่สุดเรียบร้อยค่ะ!",
+                    Duration = 2.5
+                })
+            end
+        end
+    })
+
+    local TogglePetIndex = Tabs.Pets:AddToggle("TogglePetIndex", {
+        Title = "Auto Claim Pet Index",
+        Description = "เปิดเผยสัตว์เลี้ยงใหม่และกดรับรางวัลสมุดสะสมอัตโนมัติ",
+        Default = false
+    })
+    TogglePetIndex:OnChanged(function(val)
+        State.AutoClaimPetIndex = (val ~= nil) and val or Options.TogglePetIndex.Value
+        if State.AutoClaimPetIndex then
+            ProcessPetIndex()
+        end
+        if SyncStateFromOptions then SyncStateFromOptions() end
+        if QueueAutoSave then QueueAutoSave() end
+    end)
+
+    Tabs.Pets:AddButton({
+        Title = "Claim Pet Index Now",
+        Description = "เปิดเผยและรับรางวัลสมุดสะสมทั้งหมดทันที",
+        Callback = function()
+            local res = ProcessPetIndex()
+            Fluent:Notify({
+                Title = "Pet Index",
+                Content = res and "เปิดเผยสัตว์เลี้ยงและรับรางวัลเรียบร้อยแล้วค่ะ!" or "ตรวจสอบสมุดสะสมสัตว์เลี้ยงแล้วค่ะ",
+                Duration = 2.5
+            })
+        end
+    })
+end
+
+-- =========================================================================
+-- TAB: REWARDS
+-- =========================================================================
+do
+    Tabs.Rewards:AddSection("Free Rewards (รับรางวัลฟรี)")
+
+    local ToggleGifts = Tabs.Rewards:AddToggle("ToggleGifts", {
+        Title = "Auto Playtime Gifts (1-12)",
+        Default = true
+    })
+    ToggleGifts:OnChanged(function(val)
+        State.AutoClaimGifts = (val ~= nil) and val or Options.ToggleGifts.Value
+        if SyncStateFromOptions then SyncStateFromOptions() end
+        if QueueAutoSave then QueueAutoSave() end
+    end)
+
+    local ToggleDaily = Tabs.Rewards:AddToggle("ToggleDaily", {
+        Title = "Auto Daily Rewards",
+        Default = true
+    })
+    ToggleDaily:OnChanged(function(val)
+        State.AutoClaimDaily = (val ~= nil) and val or Options.ToggleDaily.Value
+        if SyncStateFromOptions then SyncStateFromOptions() end
+        if QueueAutoSave then QueueAutoSave() end
+    end)
+
+    local ToggleOffline = Tabs.Rewards:AddToggle("ToggleOffline", {
+        Title = "Auto Offline Rewards",
+        Default = true
+    })
+    ToggleOffline:OnChanged(function(val)
+        State.AutoClaimOffline = (val ~= nil) and val or Options.ToggleOffline.Value
+        if SyncStateFromOptions then SyncStateFromOptions() end
+        if QueueAutoSave then QueueAutoSave() end
+    end)
+
+    local ToggleFree = Tabs.Rewards:AddToggle("ToggleFree", {
+        Title = "Auto Free Shop / Events",
+        Default = true
+    })
+    ToggleFree:OnChanged(function(val)
+        State.AutoClaimFree = (val ~= nil) and val or Options.ToggleFree.Value
+        if SyncStateFromOptions then SyncStateFromOptions() end
+        if QueueAutoSave then QueueAutoSave() end
+    end)
+
+    Tabs.Rewards:AddSection("Promo Codes (โค้ดรางวัล)")
+
+    Tabs.Rewards:AddInput("PromoCodeInput", {
+        Title = "Promo Code",
+        Default = "",
+        Placeholder = "พิมพ์โค้ดรับรางวัล...",
+        Numeric = false,
+        Finished = true
+    })
+
+    Tabs.Rewards:AddButton({
+        Title = "Redeem Code",
+        Callback = function()
+            local code = Options.PromoCodeInput.Value
+            if code and code ~= "" and Request then
+                Request:FireServer("RedeemCode", code)
+                Fluent:Notify({
+                    Title = "Codes",
+                    Content = "ส่งโค้ด: " .. code,
+                    Duration = 3
+                })
+            end
+        end
+    })
+end
+
+-- =========================================================================
+-- TAB: TELEPORTS
+-- =========================================================================
+do
+    Tabs.Teleports:AddSection("Active World Points (จุดสำคัญในแมพ)")
+
+    Tabs.Teleports:AddButton({
+        Title = "Launch Zone (จุดขว้างหิน)",
+        Callback = function()
+            SafeTeleport(WorldResolver.GetLaunchZonePosition())
+        end
+    })
+
+    Tabs.Teleports:AddButton({
+        Title = "Best Training Zone (แท่นฝึกสูงสุด)",
+        Callback = function()
+            SafeTeleport(WorldResolver.GetBestRebirthZone())
+        end
+    })
+
+    Tabs.Teleports:AddButton({
+        Title = "Egg Shop (ร้านสุ่มไข่)",
+        Callback = function()
+            local worldObj = WorldResolver.GetWorldObject()
+            local eggShop = worldObj and worldObj:FindFirstChild("EggShop")
+            if eggShop then
+                SafeTeleport(eggShop:GetPivot().Position)
+            else
+                SafeTeleport(Vector3.new(0, 5.5, -100))
+            end
+        end
+    })
+
+    Tabs.Teleports:AddSection("World Portals (เปลี่ยนเวิลด์)")
+
+    Tabs.Teleports:AddDropdown("WorldSelect", {
+        Title = "Destination World",
+        Values = {
+            "World 1 (Default)",
+            "World 2 (Pirate)",
+            "World 3 (Space)",
+            "World 4 (Chocolate)",
+            "World 5 (Dragon)",
+            "World 6 (Witch)"
+        },
+        Multi = false,
+        Default = 1
+    })
+
+    Tabs.Teleports:AddButton({
+        Title = "Travel to World",
+        Callback = function()
+            local worldVal = Options.WorldSelect.Value
+            local worldId = "World1"
+            if string.find(worldVal, "2") then
+                worldId = "World2"
+            elseif string.find(worldVal, "3") then
+                worldId = "World3"
+            elseif string.find(worldVal, "4") then
+                worldId = "World4"
+            elseif string.find(worldVal, "5") then
+                worldId = "World5"
+            elseif string.find(worldVal, "6") then
+                worldId = "World6"
+            end
+
+            if Request then
+                Request:FireServer("TravelWorld", worldId)
+                Fluent:Notify({
+                    Title = "World Travel",
+                    Content = "กำลังเดินทางไป " .. worldId .. "...",
+                    Duration = 3
+                })
+            end
+        end
+    })
+end
+
+-- =========================================================================
+-- TAB: PLAYER MODIFICATION
+-- =========================================================================
+do
+    Tabs.Player:AddSection("WalkSpeed (ความเร็วเดิน)")
+
+    local ToggleSpeed = Tabs.Player:AddToggle("ToggleSpeed", {
+        Title = "Enable WalkSpeed",
+        Default = false
+    })
+    ToggleSpeed:OnChanged(function(val)
+        val = (val == true)
+        State.SpeedHack = val
+        SyncStateFromOptions()
+        QueueAutoSave()
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum.WalkSpeed = val and (State.WalkSpeedValue or 32) or 16
+        end
+    end)
+
+    Tabs.Player:AddSlider("WalkSpeedSlider", {
+        Title = "Speed Value",
+        Default = 32,
+        Min = 16,
+        Max = 200,
+        Rounding = 0,
+        Callback = function(val)
+            State.WalkSpeedValue = val
+            SyncStateFromOptions()
+            QueueAutoSave()
+            if State.SpeedHack then
+                local char = LocalPlayer.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if hum then
+                    hum.WalkSpeed = val
+                end
+            end
+        end
+    })
+
+    Tabs.Player:AddSection("JumpPower (พลังกระโดด)")
+
+    local ToggleJump = Tabs.Player:AddToggle("ToggleJump", {
+        Title = "Enable JumpPower",
+        Default = false
+    })
+    ToggleJump:OnChanged(function(val)
+        val = (val == true)
+        State.JumpHack = val
+        SyncStateFromOptions()
+        QueueAutoSave()
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum.UseJumpPower = true
+            hum.JumpPower = val and (State.JumpPowerValue or 80) or 50
+        end
+    end)
+
+    Tabs.Player:AddSlider("JumpPowerSlider", {
+        Title = "Jump Value",
+        Default = 80,
+        Min = 50,
+        Max = 300,
+        Rounding = 0,
+        Callback = function(val)
+            State.JumpPowerValue = val
+            SyncStateFromOptions()
+            QueueAutoSave()
+            if State.JumpHack then
+                local char = LocalPlayer.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if hum then
+                    hum.UseJumpPower = true
+                    hum.JumpPower = val
+                end
+            end
+        end
+    })
+end
+
+-- =========================================================================
+-- TAB: SETTINGS & CONFIGS
+-- =========================================================================
+SaveManager:SetLibrary(Fluent)
+InterfaceManager:SetLibrary(Fluent)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({})
+InterfaceManager:SetFolder("StreetHub")
+SaveManager:SetFolder("StreetHub/StoneSkipping")
+
+InterfaceManager:BuildInterfaceSection(Tabs.Settings)
+SaveManager:BuildConfigSection(Tabs.Settings)
+
+do
+    Tabs.Settings:AddSection("Controls (ควบคุม)")
+
+    Tabs.Settings:AddButton({
+        Title = "Reset Settings",
+        Description = "ล้างข้อมูลการจำค่าทั้งหมด และรีเซ็ตกลับเป็นค่าเริ่มต้น",
+        Callback = function()
+            pcall(function()
+                if delfile and isfile and isfile("StreetHub/StoneSkipping_AutoSave.json") then
+                    delfile("StreetHub/StoneSkipping_AutoSave.json")
+                end
+                Fluent:Notify({
+                    Title = "Street Hub",
+                    Content = "ล้างข้อมูลบันทึกเรียบร้อยแล้วค่ะ",
+                    Duration = 3
+                })
+            end)
+        end
+    })
+
+    Tabs.Settings:AddButton({
+        Title = "Unload Script",
+        Description = "หยุดการทำงานทุกระบบ และปิดเมนูทั้งหมด",
+        Callback = function()
+            Session.Running = false
+            pcall(function()
+                if FluentScreenGui then FluentScreenGui:Destroy() end
+                if _G.StoneSkippingGui then _G.StoneSkippingGui:Destroy() end
+                local toggle = game:GetService("CoreGui"):FindFirstChild("StreetHubMobileToggle")
+                if toggle then toggle:Destroy() end
+                if Fluent and Fluent.Destroy then Fluent:Destroy() end
+            end)
+        end
+    })
+end
+
+-- =========================================================================
+-- LOAD SAVED CONFIGURATION
+-- =========================================================================
+local function LoadAutoSave()
+    pcall(function()
+        if isfile and isfile(AutoSavePath) then
+            local raw = readfile(AutoSavePath)
+            if raw and #raw > 5 then
+                local data = HttpService:JSONDecode(raw)
+                if type(data) == "table" then
+                    for name, item in pairs(data) do
+                        if AutoSaveWhitelist[name] then
+                            local opt = Fluent.Options[name]
+                            if opt and opt.SetValue and item.Value ~= nil then
+                                pcall(function()
+                                    opt:SetValue(item.Value)
+                                end)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+-- Seamlessly load previously remembered values and sync to runtime State
+LoadAutoSave()
+isInitializing = false
+SyncStateFromOptions()
+
+Window:SelectTab(1)
+
+Fluent:Notify({
+    Title = "Street Hub",
+    Content = "โหลดระบบและคืนค่าการตั้งค่าเรียบร้อยแล้วค่ะ",
+    Duration = 5
+})
+
+-- Enforce blur suppression
+pcall(function()
+    if Fluent and Fluent.ToggleAcrylic then
+        Fluent:ToggleAcrylic(false)
+    end
+    local dof = game:GetService("Lighting"):FindFirstChildOfClass("DepthOfFieldEffect")
+    if dof then
+        dof.Enabled = false
+    end
+end)
+
+-- =========================================================================
+-- BACKGROUND AUTOMATION THREADS
+-- =========================================================================
+
+-- 1. Auto Practice Thread (Dynamic Best Rebirth Pad Auto-Upgrader)
+task.spawn(function()
+    local lastZonePos = nil
+    while Session.Running do
+        task.wait(0.5)
+        if State.AutoPractice and not State.AutoThrow and not State.AutoHatch then
+            local targetPos, targetZone = nil, nil
+            if State.PracticeZone == "Auto" or State.PracticeZone == nil then
+                targetPos, targetZone = WorldResolver.GetBestRebirthZone()
+            else
+                local zones = WorldResolver.GetTrainingZones()
+                local chosen = zones[State.PracticeZone]
+                if chosen then
+                    targetPos = chosen.Position
+                    targetZone = chosen
+                else
+                    targetPos, targetZone = WorldResolver.GetBestRebirthZone()
+                end
+            end
+
+            local char = LocalPlayer.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+            if root and hum and targetPos then
+                local currentActivity = LocalPlayer:GetAttribute("SkippingActivity")
+                local dist = (root.Position - targetPos).Magnitude
+
+                -- ถ้า Rebirth เพิ่มจนได้แท่นใหม่ที่ดีกว่า หรือไม่ได้อยู่ที่แท่นเป้าหมาย (ห่างเกิน 6 studs)
+                if dist > 6 then
+                    -- 1. สั่งหยุดการฝึกที่แท่นเดิมก่อนเพื่อให้เซิร์ฟเวอร์เคลียร์สถานะ
+                    if currentActivity == "Practice" and Request then
+                        Request:FireServer("StopPractice", nil)
+                        task.wait(0.12)
+                    end
+
+                    -- 2. วาร์ปเข้าแท่นฝึกที่ดีที่สุดทันที
+                    root.CFrame = CFrame.new(targetPos + Vector3.new(0, 1.2, 0))
+                    task.wait(0.15)
+                    hum:MoveTo(targetPos)
+
+                    -- 3. แจ้งเตือนเมื่อเปลี่ยนแท่นใหม่
+                    if targetZone and lastZonePos ~= targetPos then
+                        lastZonePos = targetPos
+                        local mult = targetZone.Multiplier or "Auto"
+                        local req = targetZone.RebirthReq or 0
+                        Fluent:Notify({
+                            Title = "Auto Practice",
+                            Content = string.format("วาร์ปไปแท่นฝึกที่ดีที่สุดแล้วค่ะ! (%s | ปลดล็อกที่ %d Rebirths)", tostring(mult), req),
+                            Duration = 3.5
+                        })
+                    end
+                elseif currentActivity ~= "Practice" then
+                    -- หากยืนอยู่บนแท่นแต่หลุดสถานะ Practice ให้ขยับตัวเข้าแท่นเพื่อเริ่มฝึกใหม่
+                    hum:MoveTo(targetPos)
+                end
+            end
+        end
+    end
+end)
+
+-- Real-time Rebirth Listener for Instant Auto Practice Relocation
+pcall(function()
+    local function HookRebirthListener()
+        local ls = LocalPlayer:WaitForChild("leaderstats", 10)
+        local reb = ls and ls:WaitForChild("Rebirths", 10)
+        if reb then
+            reb:GetPropertyChangedSignal("Value"):Connect(function()
+                if State.AutoPractice and not State.AutoThrow and not State.AutoHatch and (State.PracticeZone == "Auto" or State.PracticeZone == nil) then
+                    task.delay(0.2, function()
+                        local targetPos, targetZone = WorldResolver.GetBestRebirthZone()
+                        local char = LocalPlayer.Character
+                        local root = char and char:FindFirstChild("HumanoidRootPart")
+                        local hum = char and char:FindFirstChildOfClass("Humanoid")
+                        if root and hum and targetPos and (root.Position - targetPos).Magnitude > 6 then
+                            if Request then
+                                Request:FireServer("StopPractice", nil)
+                                task.wait(0.1)
+                            end
+                            root.CFrame = CFrame.new(targetPos + Vector3.new(0, 1.2, 0))
+                            task.wait(0.15)
+                            hum:MoveTo(targetPos)
+                            if targetZone then
+                                Fluent:Notify({
+                                    Title = "Auto Practice Upgraded! ⚡",
+                                    Content = string.format("Rebirth ถึงกำหนดแล้ว! วาร์ปไปแท่น (%s | Rebirth %d) ทันที", tostring(targetZone.Multiplier or "Auto"), targetZone.RebirthReq or 0),
+                                    Duration = 4
+                                })
+                            end
+                        end
+                    end)
+                end
+            end)
+        end
+    end
+    task.spawn(HookRebirthListener)
+end)
+
+-- Native Throw Trigger Helper (Binds to game's internal Throw closure to play full cinematic cutscenes)
+local function TriggerNativeThrow()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local hud = pg and pg:FindFirstChild("SkippingHUD")
+    local bottom = hud and hud:FindFirstChild("HUD") and hud.HUD:FindFirstChild("Bottom")
+    local throwBtn = bottom and bottom:FindFirstChild("Progression") and bottom.Progression:FindFirstChild("Throw")
+
+    if throwBtn then
+        -- Method 1: call game's native BeginThrow closure from upvalues so u34 and StoneView cutscene trigger properly
+        local conns = getconnections and getconnections(throwBtn.Activated)
+        if conns and #conns > 0 and conns[1].Function then
+            local ups = debug.getupvalues(conns[1].Function)
+            if type(ups[4]) == "table" and type(ups[4].BeginThrow) == "function" then
+                ups[4].BeginThrow()
+                return true
+            end
+        end
+
+        -- Method 2: firesignal on Throw button
+        if firesignal then
+            firesignal(throwBtn.Activated)
+            return true
+        end
+    end
+
+    -- Method 3: Fallback direct network packet
+    if Request then
+        State.ThrowRequestId = State.ThrowRequestId + 1
+        Request:FireServer("Throw", State.ThrowRequestId)
+        return true
+    end
+    return false
+end
+
+-- 2. Auto Throw Thread (Multi-World LaunchZone Safe with Full Cutscene Support)
+task.spawn(function()
+    while Session.Running do
+        task.wait(0.3)
+        if State.AutoThrow and not State.AutoHatch then
+            -- 1. วาร์ปเข้าสู่ LaunchZone ของ World ปัจจุบัน
+            local launchPos = WorldResolver.GetLaunchZonePosition()
+            SafeTeleport(launchPos)
+            task.wait(0.15)
+
+            -- 2. หากยังติดสถานะ Practice ให้หยุดก่อน และรอให้กลายเป็น Idle
+            local act = LocalPlayer:GetAttribute("SkippingActivity")
+            if act == "Practice" and Request then
+                Request:FireServer("StopPractice", nil)
+                local stopWait = 0
+                repeat
+                    task.wait(0.1)
+                    stopWait = stopWait + 0.1
+                    act = LocalPlayer:GetAttribute("SkippingActivity")
+                until act ~= "Practice" or stopWait >= 1.0
+            end
+
+            -- 3. ตรวจสอบว่าพร้อมขว้างหรือไม่ (ต้องเป็นสถานะ Idle)
+            act = LocalPlayer:GetAttribute("SkippingActivity")
+            if act == "Idle" or act == nil then
+                TriggerNativeThrow()
+
+                -- 4. รอจนกว่าหินจะเริ่มบินและเข้าสู่สถานะ Throw
+                local throwStart = os.clock()
+                repeat
+                    task.wait(0.1)
+                    act = LocalPlayer:GetAttribute("SkippingActivity")
+                until act == "Throw" or os.clock() - throwStart >= 2.0
+
+                -- 5. ปล่อยให้ Cutscene แสดงเต็มรูปแบบ ติดตามหินกระดอนบนผิวน้ำจนจบ โดยไม่ปิดหรือตัดข้าม Cutscene
+                if act == "Throw" then
+                    repeat
+                        task.wait(0.3)
+                        act = LocalPlayer:GetAttribute("SkippingActivity")
+                    until act ~= "Throw" or not State.AutoThrow
+
+                    -- รอให้มุมกล้อง Reset กลับมายังตัวละครอย่างสมบูรณ์
+                    local camWait = 0
+                    while workspace.CurrentCamera.CameraType == Enum.CameraType.Scriptable and camWait < 2.0 do
+                        task.wait(0.1)
+                        camWait = camWait + 0.1
+                    end
+                end
+
+                -- หน่วงเวลาตามที่ Kovak ปรับไว้ใน Slider
+                task.wait(State.ThrowDelay or 1.0)
+            end
+        end
+    end
+end)
+
+-- 3. Auto Rebirth Thread (Universal Level Detection)
+task.spawn(function()
+    while Session.Running do
+        task.wait(2.0)
+        if State.AutoRebirth and Request then
+            pcall(function()
+                if CanPlayerRebirth() then
+                    local rebirths = 0
+                    if LocalPlayer.leaderstats and LocalPlayer.leaderstats:FindFirstChild("Rebirths") then
+                        rebirths = LocalPlayer.leaderstats.Rebirths.Value
+                    end
+                    Request:FireServer("Rebirth", rebirths)
+                end
+            end)
+        end
+    end
+end)
+
+-- 4. Auto Hatch Thread (Dynamic World Stand Positions)
+task.spawn(function()
+    while Session.Running do
+        task.wait(State.HatchDelay or 0.8)
+        if State.AutoHatch and Request then
+            if State.AutoTeleportToEgg then
+                local currentActivity = LocalPlayer:GetAttribute("SkippingActivity")
+                if currentActivity ~= "Idle" then
+                    Request:FireServer("StopPractice", nil)
+                    task.wait(0.1)
+                end
+
+                local targetPos = WorldResolver.GetEggStandPosition(State.SelectedEgg)
+                local char = LocalPlayer.Character
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                if root and (root.Position - targetPos).Magnitude > 10 then
+                    SafeTeleport(targetPos)
+                    task.wait(0.2)
+                end
+            end
+
+            -- ส่งแพ็กเก็ตสุ่มไข่
+            State.HatchRequestId = State.HatchRequestId + 1
+            Request:FireServer("HatchEgg", {
+                EggId = State.SelectedEgg,
+                Count = State.HatchCount or 1,
+                RequestId = State.HatchRequestId
+            })
+        end
+    end
+end)
+
+-- 5. Hatch Result Event Listener
+if Event then
+    Event.OnClientEvent:Connect(function(eventName, data)
+        if eventName == "HatchResult" and data then
+            if data.Success then
+                local petName = data.Pet and data.Pet.PetId or "Pet"
+                Fluent:Notify({
+                    Title = "Egg Hatched! 🐣",
+                    Content = "สุ่มได้: " .. tostring(petName) .. " จาก " .. tostring(data.EggId or "Egg"),
+                    Duration = 2.5
+                })
+                if State.AutoEquipBest and Request then
+                    task.wait(0.1)
+                    Request:FireServer("PetEquipment", { Action = "EquipBest" })
+                end
+                if State.AutoClaimPetIndex then
+                    task.delay(0.5, function()
+                        ProcessPetIndex()
+                    end)
+                end
+            elseif data.Message then
+                if string.find(data.Message, "afford") or string.find(data.Message, "Wins") then
+                    Fluent:Notify({
+                        Title = "Egg Hatch",
+                        Content = tostring(data.Message),
+                        Duration = 3
+                    })
+                end
+            end
+        end
+    end)
+end
+
+-- 6. Auto Rewards Thread (Gifts, Daily, Offline, Free Rewards)
+task.spawn(function()
+    while Session.Running do
+        task.wait(5.0)
+        if Request then
+            -- 1. Playtime Gifts (1 to 12)
+            if State.AutoClaimGifts then
+                for i = 1, 12 do
+                    Request:FireServer("ClaimGift", i)
+                    task.wait(0.04)
+                end
+            end
+
+            -- 2. Daily Rewards (Safe UI Hitbox Trigger)
+            if State.AutoClaimDaily then
+                pcall(function()
+                    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+                    local rewards = pg and pg:FindFirstChild("SkippingHUD") and pg.SkippingHUD.Frames.DailyOverlay.DailyPage.Rewards
+                    if rewards then
+                        for i = 1, 7 do
+                            local day = rewards:FindFirstChild("Day" .. i)
+                            local hitbox = day and day:FindFirstChild("Hitbox")
+                            if hitbox then
+                                if firesignal then
+                                    firesignal(hitbox.Activated)
+                                elseif getconnections then
+                                    for _, c in ipairs(getconnections(hitbox.Activated)) do
+                                        if c.Fire then c:Fire() elseif c.Function then c.Function() end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end)
+            end
+
+            -- 3. Offline Rewards
+            if State.AutoClaimOffline then
+                Request:FireServer("ClaimOffline", nil)
+            end
+
+            -- 4. Free Event / Shop Rewards
+            if State.AutoClaimFree then
+                Request:FireServer("ClaimFreeReward", nil)
+            end
+
+            -- 5. Pet Index Rewards (Auto Reveal & Auto Claim)
+            if State.AutoClaimPetIndex then
+                ProcessPetIndex()
+            end
+        end
+    end
+end)
+
+-- 7. Player Physics Loop
+RunService.Heartbeat:Connect(function()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        if State.SpeedHack and hum.WalkSpeed ~= State.WalkSpeedValue then
+            hum.WalkSpeed = State.WalkSpeedValue
+        end
+        if State.JumpHack and hum.JumpPower ~= State.JumpPowerValue then
+            hum.UseJumpPower = true
+            hum.JumpPower = State.JumpPowerValue
+        end
+    end
+end)
